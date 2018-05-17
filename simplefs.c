@@ -7,10 +7,9 @@
 #include <stdio.h>
 
 static const size_t size = 4 * 1024 * 1024 * (size_t)1024;  //文件系统最大4G	
-static char *mem;							//记录block使用情况
-static int *data;
 static size_t blocknr = 1024 * 1024;					//存储空间共分成512*1024块，每块大小4K
 static size_t blocksize = 4 * (size_t)1024;
+static void *mempoint[1024*1024];
 
 struct fsmetadata{								//文件系统基本数据
 	size_t fs_size;
@@ -30,7 +29,6 @@ struct filenode{
 
 struct mem{
 	char mem[1024*1024];			//标记各个block是否被使用
-    void *mempoint[1024*1024];           //各个block的指针
 	int emptynum;					//空block数
 	int maxseialnum;				//最大连续的空block数
 	int maxseialnum_index;			//最大连续的空block数的起始地址
@@ -43,7 +41,7 @@ static void mem_modified(char *mem,int *maxseialnum,int *maxseialnum_index,int *
 	*maxseialnum=0;
 	*emptynum=0;
 	int i;
-	for(i=257+1+2048;i<1024*1024;i++){
+	for(i=257+1;i<1024*1024;i++){
         if(mem[i]==0){
             if(num==0){temp=i;}
             num++;
@@ -80,6 +78,9 @@ static void init_filenode(struct filenode *node){                   //初始化�
 static void create_filenode(const char *name, struct stat *st){                 //创建文件结点
 	//每一个文件的元信息使用2个block
 	struct filenode *new = mmap(NULL, 2*blocksize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    //建立块指针
+    mempoint[fs_metadata->memusage->maxseialnum_index]=new;
+    mempoint[fs_metadata->memusage->maxseialnum_index+1]=new+blocksize*sizeof(char);
 	init_filenode(new);
 	memcpy(new->name, name, strlen(name) + 1);
 	memcpy(&new->st,st,sizeof(struct stat));
@@ -90,9 +91,6 @@ static void create_filenode(const char *name, struct stat *st){                 
     //修改存储空间使用情况
 	fs_metadata->memusage->mem[fs_metadata->memusage->maxseialnum_index]=1;
 	fs_metadata->memusage->mem[fs_metadata->memusage->maxseialnum_index+1]=1;
-    //建立块指针
-    fs_metadata->memusage->mempoint[fs_metadata->memusage->maxseialnum_index]=new;
-    fs_metadata->memusage->mempoint[fs_metadata->memusage->maxseialnum_index+1]=new+blocksize*sizeof(char);
 	new->usedblock[256][0]=2;
 	new->usedblock[256][1]=fs_metadata->memusage->maxseialnum_index;
 	mem_modified(fs_metadata->memusage->mem,&fs_metadata->memusage->maxseialnum,&fs_metadata->memusage->maxseialnum_index,&fs_metadata->memusage->emptynum);
@@ -182,7 +180,7 @@ static int simplefs_write(const char *path, const char *buf, size_t size, off_t 
     			memcpy(node->content[0],buf,size);
     			for(i=fs_metadata->memusage->maxseialnum_index;i<num+fs_metadata->memusage->maxseialnum_index;i++){
     				fs_metadata->memusage->mem[i]=1;
-                    fs_metadata->memusage->mempoint[i]=node->content[0]+(i-fs_metadata->memusage->maxseialnum_index)*blocksize*sizeof(char);
+                    mempoint[i]=node->content[0]+(i-fs_metadata->memusage->maxseialnum_index)*blocksize*sizeof(char);
     			}
     			node->usedblock[0][0]=num;
     			node->usedblock[0][1]=fs_metadata->memusage->maxseialnum_index;
@@ -202,7 +200,7 @@ static int simplefs_write(const char *path, const char *buf, size_t size, off_t 
     					memcpy(node->content[cnt],buf+size-rest,fs_metadata->memusage->maxseialnum*blocksize);
     					for(i=fs_metadata->memusage->maxseialnum_index;i<fs_metadata->memusage->maxseialnum+fs_metadata->memusage->maxseialnum_index;i++){
     						fs_metadata->memusage->mem[i]=1;
-                            fs_metadata->memusage->mempoint[i]=node->content[cnt]+(i-fs_metadata->memusage->maxseialnum_index)*blocksize*sizeof(char);
+                            mempoint[i]=node->content[cnt]+(i-fs_metadata->memusage->maxseialnum_index)*blocksize*sizeof(char);
     					}
     					node->usedblock[cnt][0]=fs_metadata->memusage->maxseialnum;
     					node->usedblock[cnt][1]=fs_metadata->memusage->maxseialnum_index;
@@ -217,7 +215,7 @@ static int simplefs_write(const char *path, const char *buf, size_t size, off_t 
     					memcpy(node->content[cnt],buf+size-rest,fs_metadata->memusage->maxseialnum*blocksize);
     					for(i=fs_metadata->memusage->maxseialnum_index;i<num+fs_metadata->memusage->maxseialnum_index;i++){
     						fs_metadata->memusage->mem[i]=1;
-                            fs_metadata->memusage->mempoint[i]=node->content[cnt]+(i-fs_metadata->memusage->maxseialnum_index)*blocksize*sizeof(char);
+                            mempoint[i]=node->content[cnt]+(i-fs_metadata->memusage->maxseialnum_index)*blocksize*sizeof(char);
     					}
     					node->usedblock[cnt][0]=num;
     					node->usedblock[cnt][1]=fs_metadata->memusage->maxseialnum_index;
@@ -236,32 +234,6 @@ static int simplefs_write(const char *path, const char *buf, size_t size, off_t 
     }
     //非首次写文件
     else if(j != 0){
-    	/*num=0;
-    	pre=0;
-    	for(i=0;i<256;i++){
-    		if(node->content[i]!=NULL){
-    			pre=num;
-    			num=num+node->usedblock[i][0];
-    		}
-    		if(num*blocksize>=offset+1 && pre*blocksize < offset+1){
-    			j=i;
-    			break;
-    		}
-    	}
-    	index=offset-pre*blocksize;
-    	extra=index;
-    	buff=(char *)malloc(size+index);
-    	if(index>0){
-    	memcpy(buff,node->content[j],index);}
-    	memcpy(buff+index,buf,size);
-    	munmap(node->content[j],node->usedblock[j][0]*blocksize);
-    	node->content[j]=NULL;
-    	node->st.st_blocks-=node->usedblock[j][0];
-    	for(i=0;i<node->usedblock[j][0];i++){
-    		fs_metadata->memusage->mem[node->usedblock[j][1]+i]=0;
-    	}
-    	node->usedblock[j][0]=0;
-    	node->usedblock[j][1]=0;*/
         //保存文件offset前和offset+size后(如果有)的内容
 		num=0;
     	pre=0;
@@ -284,7 +256,7 @@ static int simplefs_write(const char *path, const char *buf, size_t size, off_t 
                 pre2=num2;
                 num2=num2+node->usedblock[i][0];
             }
-            if(num2*blocksize>=offset2+1 && pre2*blocksize < offset2+1){
+            if(num2*blocksize>=offset2 && pre2*blocksize < offset2){
                 k=i;
                 break;
             }
@@ -335,7 +307,7 @@ static int simplefs_write(const char *path, const char *buf, size_t size, off_t 
         node->st.st_blocks-=node->usedblock[j][0];
         for(k=0;k<node->usedblock[i][0];k++){
             fs_metadata->memusage->mem[node->usedblock[i][1]+k]=0;
-            fs_metadata->memusage->mempoint[node->usedblock[i][1]+k]=NULL;
+            mempoint[node->usedblock[i][1]+k]=NULL;
         }
         node->usedblock[i][0]=0;
         node->usedblock[i][1]=0;
@@ -356,7 +328,7 @@ static int simplefs_write(const char *path, const char *buf, size_t size, off_t 
     			memcpy(node->content[j],buff,size+extra);
     			for(i=fs_metadata->memusage->maxseialnum_index;i<num+fs_metadata->memusage->maxseialnum_index;i++){
     				fs_metadata->memusage->mem[i]=1;
-                    fs_metadata->memusage->mempoint[i]=node->content[j]+(i-fs_metadata->memusage->maxseialnum_index)*blocksize*sizeof(char);
+                    mempoint[i]=node->content[j]+(i-fs_metadata->memusage->maxseialnum_index)*blocksize*sizeof(char);
     			}
     			node->usedblock[j][0]=num;
     			node->usedblock[j][1]=fs_metadata->memusage->maxseialnum_index;
@@ -376,7 +348,7 @@ static int simplefs_write(const char *path, const char *buf, size_t size, off_t 
     					memcpy(node->content[cnt],buff+size+extra-rest,fs_metadata->memusage->maxseialnum*blocksize);
     					for(i=fs_metadata->memusage->maxseialnum_index;i<fs_metadata->memusage->maxseialnum+fs_metadata->memusage->maxseialnum_index;i++){
     						fs_metadata->memusage->mem[i]=1;
-                            fs_metadata->memusage->mempoint[i]=node->content[cnt]+(i-fs_metadata->memusage->maxseialnum_index)*blocksize*sizeof(char);
+                            mempoint[i]=node->content[cnt]+(i-fs_metadata->memusage->maxseialnum_index)*blocksize*sizeof(char);
     					}
     					node->usedblock[cnt][0]=fs_metadata->memusage->maxseialnum;
     					node->usedblock[cnt][1]=fs_metadata->memusage->maxseialnum_index;
@@ -385,18 +357,18 @@ static int simplefs_write(const char *path, const char *buf, size_t size, off_t 
     					cnt++;
     				}
     				else if(fs_metadata->memusage->maxseialnum*blocksize > rest){
-    					//if(size%blocksize!=0){
+    					if(size%blocksize!=0){
     						num=rest/blocksize + 1;
-    					//}
-    					//else{
-    					//	num=size/blocksize;
-    					//}
+    					}
+    					else{
+    						num=size/blocksize;
+    					}
     					node->content[cnt]=mmap(NULL, num*blocksize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     					node->st.st_blocks+=num;
     					memcpy(node->content[cnt],buff+size+extra-rest,fs_metadata->memusage->maxseialnum*blocksize);
     					for(i=fs_metadata->memusage->maxseialnum_index;i<num+fs_metadata->memusage->maxseialnum_index;i++){
     						fs_metadata->memusage->mem[i]=1;
-                            fs_metadata->memusage->mempoint[i]=node->content[cnt]+(i-fs_metadata->memusage->maxseialnum_index)*blocksize*sizeof(char);
+                            mempoint[i]=node->content[cnt]+(i-fs_metadata->memusage->maxseialnum_index)*blocksize*sizeof(char);
     					}
     					node->usedblock[cnt][0]=num;
     					node->usedblock[cnt][1]=fs_metadata->memusage->maxseialnum_index;
@@ -461,7 +433,7 @@ static int simplefs_truncate(const char *path, off_t size){      //修改文件�
 			node->st.st_blocks-=node->usedblock[i-1][0];
 			for(k=0;k<node->usedblock[i-1][0];k++){
 				fs_metadata->memusage->mem[node->usedblock[i-1][1]+k]=0;
-                fs_metadata->memusage->mempoint[node->usedblock[i-1][1]+k]=NULL;
+                mempoint[node->usedblock[i-1][1]+k]=NULL;
 			}
 			mem_modified(fs_metadata->memusage->mem,&fs_metadata->memusage->maxseialnum,&fs_metadata->memusage->maxseialnum_index,&fs_metadata->memusage->emptynum);
 			node->content[i-1]=mmap(NULL, (node->usedblock[i-1][0]-n)*blocksize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -470,7 +442,7 @@ static int simplefs_truncate(const char *path, off_t size){      //修改文件�
 			node->usedblock[i-1][1]=fs_metadata->memusage->maxseialnum_index;
 			for(k=0;k<node->usedblock[i-1][0];k++){
 				fs_metadata->memusage->mem[node->usedblock[i-1][1]+k]=0;
-                fs_metadata->memusage->mempoint[node->usedblock[i-1][1]+k]=NULL;
+                mempoint[node->usedblock[i-1][1]+k]=NULL;
 			}
 			node->st.st_blocks+=node->usedblock[i-1][0];
 			mem_modified(fs_metadata->memusage->mem,&fs_metadata->memusage->maxseialnum,&fs_metadata->memusage->maxseialnum_index,&fs_metadata->memusage->emptynum);
@@ -483,7 +455,7 @@ static int simplefs_truncate(const char *path, off_t size){      //修改文件�
 			node->usedblock[i-1][1]=0;
 			for(k=0;k<node->usedblock[i-1][0];k++){
 				fs_metadata->memusage->mem[node->usedblock[i-1][1]+k]=0;
-                fs_metadata->memusage->mempoint[node->usedblock[i-1][1]+k]=NULL;
+                mempoint[node->usedblock[i-1][1]+k]=NULL;
 			}
 			mem_modified(fs_metadata->memusage->mem,&fs_metadata->memusage->maxseialnum,&fs_metadata->memusage->maxseialnum_index,&fs_metadata->memusage->emptynum);
 		}
@@ -499,7 +471,7 @@ static int simplefs_truncate(const char *path, off_t size){      //修改文件�
 					node->st.st_blocks-=node->usedblock[j][0];
 					for(k=0;k<node->usedblock[j][0];k++){
 						fs_metadata->memusage->mem[node->usedblock[j][1]+k]=0;
-                        fs_metadata->memusage->mempoint[node->usedblock[j][1]+k]=NULL;
+                        mempoint[node->usedblock[j][1]+k]=NULL;
 					}
 					node->usedblock[j][0]=0;
 					node->usedblock[j][1]=0;
@@ -512,7 +484,7 @@ static int simplefs_truncate(const char *path, off_t size){      //修改文件�
 					node->st.st_blocks-=node->usedblock[j][0];
 					for(k=0;k<node->usedblock[j][0];k++){
 						fs_metadata->memusage->mem[node->usedblock[j][1]+k]=0;
-                        fs_metadata->memusage->mempoint[node->usedblock[j][1]+k]=NULL;
+                        mempoint[node->usedblock[j][1]+k]=NULL;
 					}
 					node->usedblock[j][0]=0;
 					node->usedblock[j][1]=0;
@@ -527,7 +499,7 @@ static int simplefs_truncate(const char *path, off_t size){      //修改文件�
 				node->st.st_blocks-=node->usedblock[j][0];
 				for(k=0;k<node->usedblock[j][0];k++){
 					fs_metadata->memusage->mem[node->usedblock[j][1]+k]=0;
-                    fs_metadata->memusage->mempoint[node->usedblock[j][1]+k]=NULL;
+                    mempoint[node->usedblock[j][1]+k]=NULL;
 				}
 				mem_modified(fs_metadata->memusage->mem,&fs_metadata->memusage->maxseialnum,&fs_metadata->memusage->maxseialnum_index,&fs_metadata->memusage->emptynum);
 				node->content[j]=mmap(NULL, (node->usedblock[j][0]-n)*blocksize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -536,7 +508,7 @@ static int simplefs_truncate(const char *path, off_t size){      //修改文件�
 				node->usedblock[j][1]=fs_metadata->memusage->maxseialnum_index;
 				for(k=0;k<node->usedblock[j][0];k++){
 					fs_metadata->memusage->mem[node->usedblock[j][1]+k]=0;
-                    fs_metadata->memusage->mempoint[node->usedblock[j][1]+k]=NULL;
+                    mempoint[node->usedblock[j][1]+k]=NULL;
 				}
 				node->st.st_blocks+=node->usedblock[j][0];
 				mem_modified(fs_metadata->memusage->mem,&fs_metadata->memusage->maxseialnum,&fs_metadata->memusage->maxseialnum_index,&fs_metadata->memusage->emptynum);
@@ -557,7 +529,7 @@ static int simplefs_truncate(const char *path, off_t size){      //修改文件�
 			node->st.st_blocks+=j;
 			for(k=0;k<j;k++){
 				fs_metadata->memusage->mem[fs_metadata->memusage->maxseialnum_index+k]=1;
-                fs_metadata->memusage->mempoint[fs_metadata->memusage->maxseialnum_index+k]=node->content[i]+k*blocksize*sizeof(char);
+                mempoint[fs_metadata->memusage->maxseialnum_index+k]=node->content[i]+k*blocksize*sizeof(char);
 			}
 			node->usedblock[i][0]=j;
 			node->usedblock[i][1]=fs_metadata->memusage->maxseialnum_index;
@@ -570,7 +542,7 @@ static int simplefs_truncate(const char *path, off_t size){      //修改文件�
 			node->st.st_blocks+=fs_metadata->memusage->maxseialnum;
 			for(k=0;k<fs_metadata->memusage->maxseialnum;k++){
 				fs_metadata->memusage->mem[fs_metadata->memusage->maxseialnum_index+k]=1;
-                fs_metadata->memusage->mempoint[fs_metadata->memusage->maxseialnum_index+k]=node->content[cnt]+k*blocksize*sizeof(char);
+                mempoint[fs_metadata->memusage->maxseialnum_index+k]=node->content[cnt]+k*blocksize*sizeof(char);
 			}
 			node->usedblock[cnt][0]=fs_metadata->memusage->maxseialnum;
 			node->usedblock[cnt][1]=fs_metadata->memusage->maxseialnum_index;
@@ -656,7 +628,7 @@ static int simplefs_unlink(const char *path)       //删除文件
     	if(node->content[i] != NULL){
     		for(j=0;j<node->usedblock[i][0];j++){
     			fs_metadata->memusage->mem[node->usedblock[i][1]+j]=0;
-                fs_metadata->memusage->mempoint[node->usedblock[i][1]+j]=NULL;
+                mempoint[node->usedblock[i][1]+j]=NULL;
     		}
     		munmap(node->content[i],node->usedblock[i][0]*blocksize);
     		node->content[i]=NULL;
@@ -683,20 +655,20 @@ static void *simplefs_init(struct fuse_conn_info *conn){			  //文件系统初�
 	fs_metadata->fs_blocknr=blocknr;
 	fs_metadata->root=NULL;
 	//第2~2306块block存放文件系统block情况
-	fs_metadata->memusage = mmap(NULL, (257+2048)*blocksize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	fs_metadata->memusage = mmap(NULL, 257*blocksize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 	int i;
     //块指针修改
-    fs_metadata->memusage->mempoint[0]=fs_metadata;
-    for(i=1;i<257+2048;i++){
-        fs_metadata->memusage->mempoint[i]=fs_metadata->memusage+(i-1)*sizeof(char);
+    mempoint[0]=fs_metadata;
+    for(i=1;i<257;i++){
+        mempoint[i]=fs_metadata->memusage+(i-1)*sizeof(char);
     }
-	for(i=0;i<257+1+2048;i++){
+	for(i=0;i<257+1;i++){
 		fs_metadata->memusage->mem[i]=1;
 	}
 	for(i=257+1+2048;i<1024*1024;i++){
 		fs_metadata->memusage->mem[i]=0;
 	}
-	fs_metadata->memusage->emptynum=1024*1024-257-1-2048;
+	fs_metadata->memusage->emptynum=1024*1024-257-1;
 	fs_metadata->memusage->maxseialnum=257+1;
 }
 
